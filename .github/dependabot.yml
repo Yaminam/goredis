@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+
+  # Bumps the SHA pins in .github/workflows together with their "# vX.Y.Z"
+  # comments.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Dockerfile base images (golang builder tag, distroless digest).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Prometheus and Grafana images in the compose stack.
+  - package-ecosystem: docker-compose
+    directory: /deploy/docker
+    schedule:
+      interval: weekly

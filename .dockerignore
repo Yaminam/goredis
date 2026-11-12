@@ -1,0 +1,33 @@
+# Keep the build context small and the layer cache stable: only Go sources,
+# go.mod and go.sum are needed to build the binaries.
+.git
+.github
+.gitattributes
+.gitignore
+.dockerignore
+.idea
+.vscode
+*.md
+docs/
+deploy/
+monitoring/
+scripts/
+Makefile
+Dockerfile
+
+# Build output and local data
+bin/
+dist/
+data/
+*.exe
+*.test
+*.out
+coverage.*
+*.aof
+*.aof.lock
+*.aof.bak*
+
+# Local secrets
+.env
+.env.*
+**/.env

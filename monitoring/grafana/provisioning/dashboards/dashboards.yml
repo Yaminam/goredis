@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: goredis
+    orgId: 1
+    folder: goredis
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      # Mounted by deploy/docker/docker-compose.yml from monitoring/grafana/dashboards.
+      path: /etc/grafana/dashboards

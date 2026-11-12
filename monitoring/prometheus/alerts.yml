@@ -1,0 +1,121 @@
+# Alert rules for goredis. Each alert's "runbook" annotation points at the
+# matching section of docs/incidents.md.
+#
+# The rules assume the scrape job is called "goredis" (true for
+# monitoring/prometheus/prometheus.yml). Adjust GoredisDown if your job label
+# differs (for example with prometheus-operator it is the Service name).
+groups:
+  - name: goredis
+    rules:
+      - alert: GoredisDown
+        expr: up{job="goredis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "goredis target {{ $labels.instance }} is down"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} for 1 minute."
+          runbook: "docs/incidents.md#goredisdown"
+
+      - alert: GoredisHighErrorRate
+        expr: |
+          (
+            sum by (instance) (rate(goredis_command_errors_total[5m]))
+            /
+            sum by (instance) (rate(goredis_commands_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "goredis error rate above 5% on {{ $labels.instance }}"
+          description: "{{ $value | humanizePercentage }} of commands returned an error over the last 5 minutes. Break it down with sum by (command) (rate(goredis_command_errors_total[5m]))."
+          runbook: "docs/incidents.md#goredishigherrorrate"
+
+      - alert: GoredisHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (instance, le) (rate(goredis_command_duration_seconds_bucket[5m]))
+          ) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "goredis p99 command latency above 10ms on {{ $labels.instance }}"
+          description: "p99 latency is {{ $value | humanizeDuration }} (threshold 10ms) for 10 minutes."
+          runbook: "docs/incidents.md#goredishighlatencyp99"
+
+      - alert: GoredisAOFUnhealthy
+        expr: goredis_aof_healthy == 0 and on (instance) goredis_aof_enabled == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "goredis AOF persistence is failing on {{ $labels.instance }}"
+          description: "Writes are being rejected with -MISCONF. Check disk space on the data volume."
+          runbook: "docs/incidents.md#goredisaofunhealthy"
+
+      - alert: GoredisAOFWriteErrors
+        expr: |
+          increase(goredis_aof_write_errors_total[5m]) > 0
+          or
+          increase(goredis_aof_fsync_errors_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "goredis AOF write or fsync errors on {{ $labels.instance }}"
+          description: "{{ $value }} AOF write or fsync errors in the last 5 minutes. An fsync error keeps the AOF unhealthy until a successful BGREWRITEAOF or a restart."
+          runbook: "docs/incidents.md#goredisaofwriteerrors"
+
+      - alert: GoredisMemoryNearLimit
+        # Only meaningful when maxmemory is set (0 = unlimited).
+        expr: |
+          (goredis_dataset_bytes / goredis_maxmemory_bytes > 0.9)
+          and on (instance)
+          goredis_maxmemory_bytes > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "goredis dataset above 90% of maxmemory on {{ $labels.instance }}"
+          description: "Estimated dataset is {{ $value | humanizePercentage }} of maxmemory. SET will fail with -OOM at 100%."
+          runbook: "docs/incidents.md#goredismemorynearlimit"
+      # Kubernetes variant (needs cAdvisor and kube-state-metrics). It catches
+      # the container approaching its memory limit even when maxmemory is 0:
+      #
+      # - alert: GoredisContainerMemoryNearLimit
+      #   expr: |
+      #     max by (namespace, pod) (container_memory_working_set_bytes{container="goredis"})
+      #     /
+      #     max by (namespace, pod) (kube_pod_container_resource_limits{container="goredis", resource="memory"})
+      #     > 0.9
+      #   for: 5m
+      #   labels:
+      #     severity: warning
+      #   annotations:
+      #     summary: "goredis container memory above 90% of its limit"
+      #     runbook: "docs/incidents.md#goredismemorynearlimit"
+
+      - alert: GoredisTooManyClients
+        # 800 = 80% of the default GOREDIS_MAX_CLIENTS (1000). Adjust if you
+        # change max-clients.
+        expr: |
+          goredis_connected_clients > 800
+          or
+          increase(goredis_rejected_connections_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "goredis is close to or at max clients on {{ $labels.instance }}"
+          description: "Connected clients are above 80% of max-clients, or connections are being rejected."
+          runbook: "docs/incidents.md#goredistoomanyclients"
+
+      - alert: GoredisRecentRestart
+        expr: goredis_uptime_seconds < 300
+        labels:
+          severity: info
+        annotations:
+          summary: "goredis on {{ $labels.instance }} restarted in the last 5 minutes"
+          description: "Uptime is {{ $value | humanizeDuration }}. Expected after a deploy; otherwise look for OOMKilled or crash loops."
+          runbook: "docs/incidents.md#goredisrecentrestart"

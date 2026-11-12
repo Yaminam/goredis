@@ -1,0 +1,203 @@
+name: verify
+
+# End-to-end verification on real infrastructure:
+#   kubernetes: build the image, deploy the real manifests to a kind cluster,
+#               test auth, probes, security context, and data surviving a pod
+#               restart (PVC + graceful-shutdown flush).
+#   linux-bench: run the Go benchmarks and goredis-bench on Linux, where the
+#               monotonic clock is precise enough for sub-ms latencies.
+#
+# Runs on pushes to main and on demand. It never deploys anywhere outside
+# the throwaway kind cluster inside the job.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.33.0
+  # sha256 of kind-linux-amd64 from the v0.33.0 release's .sha256sum file.
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+
+jobs:
+  kubernetes:
+    name: kubernetes (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: build image
+        run: docker build --build-arg VERSION=verify-${GITHUB_SHA::7} -t goredis:ci .
+
+      - name: install kind
+        run: |
+          curl -fsSL -o /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+          kind version
+          kubectl version --client
+
+      - name: create cluster and load image
+        run: |
+          kind create cluster --name goredis --wait 180s
+          kind load docker-image goredis:ci --name goredis
+          kubectl get nodes -o wide
+          kubectl get storageclass
+
+      - name: deploy the real manifests
+        run: |
+          kubectl apply -f deploy/kubernetes/namespace.yaml
+          # Random password, never printed. Hex only, so it is safe in inline commands.
+          openssl rand -hex 24 > /tmp/goredis-password
+          kubectl -n goredis create secret generic goredis-auth --from-file=password=/tmp/goredis-password
+          # Same manifests as production, with the image swapped for the one just built.
+          kubectl kustomize deploy/kubernetes \
+            | sed 's#ghcr.io/OWNER/goredis:latest#goredis:ci#' \
+            | kubectl apply -f -
+          kubectl -n goredis rollout status deploy/goredis --timeout=180s
+          kubectl -n goredis get pods,pvc,svc -o wide
+
+      - name: check pod security and probes
+        run: |
+          set -euo pipefail
+          POD=$(kubectl -n goredis get pod -l app.kubernetes.io/name=goredis -o jsonpath='{.items[0].metadata.name}')
+          echo "pod: $POD"
+          ready=$(kubectl -n goredis get pod "$POD" -o jsonpath='{.status.containerStatuses[0].ready}')
+          restarts=$(kubectl -n goredis get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+          uid=$(kubectl -n goredis get pod "$POD" -o jsonpath='{.spec.securityContext.runAsUser}')
+          rofs=$(kubectl -n goredis get pod "$POD" -o jsonpath='{.spec.containers[0].securityContext.readOnlyRootFilesystem}')
+          echo "ready=$ready restarts=$restarts runAsUser=$uid readOnlyRootFilesystem=$rofs"
+          [ "$ready" = "true" ] && [ "$restarts" = "0" ] && [ "$uid" = "65532" ] && [ "$rofs" = "true" ]
+          echo "--- startup log (JSON):"
+          kubectl -n goredis logs "$POD" | head -20
+          kubectl -n goredis logs "$POD" | grep -q '"msg":"goredis ready"'
+          kubectl -n goredis logs "$POD" | grep -q '"auth_enabled":true'
+          if kubectl -n goredis logs "$POD" | grep -qF "$(cat /tmp/goredis-password)"; then
+            echo "password leaked into logs"; exit 1
+          fi
+
+      - name: talk to goredis through the Service
+        run: |
+          set -euo pipefail
+          PW=$(cat /tmp/goredis-password)
+          kubectl -n goredis port-forward svc/goredis 6379:6379 9379:9379 > /tmp/pf.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:9379/readyz && break; sleep 1; done
+          echo
+          echo "--- without AUTH:"
+          out=$(printf 'GET k\r\n' | nc -N 127.0.0.1 6379)
+          echo "$out"; echo "$out" | grep -q NOAUTH
+          echo "--- with AUTH:"
+          out=$(printf 'AUTH %s\r\nSET k8s:key survived-restart\r\nSET k8s:ttl v EX 3600\r\nGET k8s:key\r\nTTL k8s:ttl\r\nFLUSHDB\r\nDBSIZE\r\n' "$PW" | nc -N 127.0.0.1 6379)
+          echo "$out"
+          echo "$out" | grep -q "survived-restart"
+          echo "$out" | grep -q "disabled by server configuration"
+          echo "$out" | grep -q ":2"
+          echo "--- metrics:"
+          curl -fsS http://127.0.0.1:9379/metrics | grep -E '^goredis_(keys|aof_healthy|aof_recovery_success|commands_total)' | head -20
+          curl -fsS http://127.0.0.1:9379/metrics | grep -q '^goredis_keys 2'
+          curl -fsS http://127.0.0.1:9379/healthz; echo
+          kill %1 || true
+
+      - name: restart the pod; data must survive (PVC + graceful flush)
+        run: |
+          set -euo pipefail
+          PW=$(cat /tmp/goredis-password)
+          OLD=$(kubectl -n goredis get pod -l app.kubernetes.io/name=goredis -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n goredis logs -f "$OLD" > /tmp/old-pod.log 2>&1 &
+          kubectl -n goredis rollout restart deploy/goredis
+          kubectl -n goredis rollout status deploy/goredis --timeout=180s
+          sleep 2
+          echo "--- shutdown log of the old pod:"
+          grep -E 'shutdown|append-only file flushed' /tmp/old-pod.log
+          grep -q 'append-only file flushed and closed' /tmp/old-pod.log
+          grep -q '"msg":"shutdown complete"' /tmp/old-pod.log
+          NEW=$(kubectl -n goredis get pod -l app.kubernetes.io/name=goredis -o jsonpath='{.items[0].metadata.name}')
+          echo "old pod: $OLD  new pod: $NEW"
+          [ "$OLD" != "$NEW" ]
+          echo "--- startup log of the new pod (AOF replay):"
+          kubectl -n goredis logs "$NEW" | grep -E 'append-only file loaded'
+          kubectl -n goredis port-forward svc/goredis 6379:6379 > /tmp/pf2.log 2>&1 &
+          for i in $(seq 1 30); do nc -z 127.0.0.1 6379 && break; sleep 1; done
+          out=$(printf 'AUTH %s\r\nGET k8s:key\r\nTTL k8s:ttl\r\nDBSIZE\r\n' "$PW" | nc -N 127.0.0.1 6379)
+          echo "$out"
+          echo "$out" | grep -q "survived-restart"
+          echo "$out" | grep -q ":2"
+          kill %2 || true
+
+      - name: dump state on failure
+        if: failure()
+        run: |
+          kubectl -n goredis get all,pvc,events -o wide || true
+          kubectl -n goredis describe pods || true
+          kubectl -n goredis logs -l app.kubernetes.io/name=goredis --tail=200 || true
+          cat /tmp/old-pod.log /tmp/pf.log /tmp/pf2.log 2>/dev/null || true
+
+  linux-bench:
+    name: linux benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: machine
+        run: |
+          {
+            echo "## Test conditions"
+            echo '```'
+            uname -a
+            lscpu | grep -E 'Model name|^CPU\(s\)|Thread|MHz' || true
+            free -h | head -2
+            go version
+            echo "Shared GitHub-hosted runner; client and server on the same VM (loopback)."
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY" bench.txt
+
+      - name: go benchmarks
+        run: |
+          go test -run='^$' -bench=. -benchmem -benchtime=2s -count=3 \
+            ./internal/store ./internal/protocol ./benchmarks 2>&1 | tee gobench.txt
+          { echo "## go test -bench"; echo '```'; grep -E '^(Benchmark|cpu)' gobench.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: goredis-bench load tests
+        run: |
+          set -euo pipefail
+          go build -o bin/ ./cmd/...
+          echo "## goredis-bench (50 clients, 64 B values, 10k keys)" >> "$GITHUB_STEP_SUMMARY"
+          for fs in everysec always; do
+            dir=$(mktemp -d)
+            ./bin/goredis -addr 127.0.0.1:6379 -admin-addr 127.0.0.1:9379 -aof-fsync "$fs" -aof-path "$dir/appendonly.aof" -log-level warn &
+            pid=$!
+            for i in $(seq 1 30); do curl -fsS http://127.0.0.1:9379/readyz >/dev/null 2>&1 && break; sleep 0.5; done
+            for args in "-requests 200000 -ratio 1:1" "-requests 500000 -ratio 1:1 -pipeline 16" "-requests 200000 -ratio 9:1" "-requests 50000 -ratio 0:1"; do
+              echo "### fsync=$fs $args" | tee -a "$GITHUB_STEP_SUMMARY" bench.txt
+              ./bin/goredis-bench -addr 127.0.0.1:6379 -clients 50 -keyspace 10000 -value-size 64 $args > run.txt
+              { echo '```'; cat run.txt; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" bench.txt
+            done
+            echo "fsync stats ($fs):" | tee -a bench.txt
+            curl -fsS http://127.0.0.1:9379/metrics | grep -E '^goredis_aof_fsync_duration_seconds_(sum|count)|^goredis_commands_total\{command="set"\}' | tee -a bench.txt
+            kill "$pid"; wait "$pid" || true
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-bench
+          path: |
+            bench.txt
+            gobench.txt

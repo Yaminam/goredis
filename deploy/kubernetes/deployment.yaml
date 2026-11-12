@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goredis
+  labels:
+    app.kubernetes.io/name: goredis
+spec:
+  # goredis is a single-node server with one AOF file. Do not scale this up:
+  # extra replicas would not share data and could not share the volume.
+  replicas: 1
+  # Recreate, not RollingUpdate. The AOF is a single-writer file on a
+  # ReadWriteOnce volume. A surge rollout would start the new pod while the old
+  # one still runs: on the same node both would open the same file, on another
+  # node the new pod would hang waiting for the volume to detach. Recreate
+  # stops the old pod completely (it flushes and fsyncs the AOF on SIGTERM)
+  # before the new one starts. The cost is a short outage on every rollout.
+  # The binary also holds an OS lock on <aof>.lock as defense in depth.
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: goredis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: goredis
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9379"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      # Must be longer than GOREDIS_SHUTDOWN_TIMEOUT (20s) so the server can
+      # finish in-flight commands and fsync the AOF before SIGKILL.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the volume group-writable by 65532 (see docs/troubleshooting.md).
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: goredis
+          # Replace OWNER with your GitHub user or org (lowercase) and pin a
+          # release tag or, better, a digest: ghcr.io/acme/goredis@sha256:...
+          # Or override it in kustomization.yaml (images:).
+          image: ghcr.io/OWNER/goredis:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: resp
+              containerPort: 6379
+              protocol: TCP
+            - name: admin
+              containerPort: 9379
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: goredis-config
+          env:
+            # Soft limit for the Go runtime, about 90% of the 256Mi memory
+            # limit. As the heap approaches it, the GC runs more often instead
+            # of letting the heap grow to 2x the live data (GOGC=100) and
+            # crossing the cgroup limit (OOMKilled). The remaining ~10% covers
+            # non-heap memory (goroutine stacks, runtime metadata). Keep it in
+            # sync with resources.limits.memory.
+            - name: GOMEMLIMIT
+              value: "230MiB"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # Memory is not compressible, so it has a hard limit.
+              memory: 256Mi
+              # No CPU limit on purpose: CFS quota throttling stalls the
+              # process for the rest of a 100ms period once the quota is used,
+              # which shows up as p99 latency spikes and slow GC. The request
+              # still guarantees a fair share under contention.
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: auth
+              mountPath: /etc/goredis/auth
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+          # Allows a long AOF replay at startup: up to 120 x 5s = 10 minutes
+          # before the kubelet gives up and restarts the container. Liveness
+          # and readiness only start after this probe succeeds.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          # /healthz stays 200 on persistence failures on purpose: a restart
+          # would drop buffered writes. Those are alerted on via metrics.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: goredis-data
+        - name: auth
+          secret:
+            secretName: goredis-auth
+            optional: false
+            # Owner root, group 65532 (fsGroup): readable by the server only.
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

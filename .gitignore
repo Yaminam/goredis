@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Local data (append-only files written during manual testing)
+/data/
+*.aof
+*.aof.lock
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local secrets (docker compose reads deploy/docker/.env)
+.env
+.env.*

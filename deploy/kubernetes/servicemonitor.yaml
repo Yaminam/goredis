@@ -1,0 +1,29 @@
+# OPTIONAL. Requires prometheus-operator (the monitoring.coreos.com CRDs, e.g.
+# from kube-prometheus-stack). Without the CRD, "kubectl apply" fails with
+# 'no matches for kind "ServiceMonitor"'. That is why this file is NOT listed
+# in kustomization.yaml. Apply it separately:
+#
+#   kubectl apply -n goredis -f deploy/kubernetes/servicemonitor.yaml
+#
+# Your Prometheus must select it: kube-prometheus-stack by default only picks
+# ServiceMonitors labelled release: <helm release name>.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: goredis
+  namespace: goredis
+  labels:
+    app.kubernetes.io/name: goredis
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: goredis
+  namespaceSelector:
+    matchNames:
+      - goredis
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

@@ -1,0 +1,41 @@
+# Ingress allow-list for goredis pods. Requires a CNI that enforces
+# NetworkPolicy (Calico, Cilium, ...); otherwise it is silently ignored.
+#
+#   6379 (RESP):  only pods in this namespace labelled goredis-client: "true".
+#   9379 (admin): only pods in the "monitoring" namespace (Prometheus).
+#
+# Kubelet health probes come from the node and are not affected by this policy
+# on most CNIs. Egress is not restricted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: goredis
+  labels:
+    app.kubernetes.io/name: goredis
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: goredis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              goredis-client: "true"
+        # To also allow labelled clients from other namespaces, replace the
+        # entry above with (both selectors in ONE entry means AND):
+        # - namespaceSelector: {}
+        #   podSelector:
+        #     matchLabels:
+        #       goredis-client: "true"
+      ports:
+        - protocol: TCP
+          port: 6379
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9379

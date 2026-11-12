@@ -1,0 +1,97 @@
+# Local development stack: goredis + Prometheus + Grafana.
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d --build
+#
+#   goredis     127.0.0.1:6379 (RESP), http://127.0.0.1:9379/metrics
+#   Prometheus  http://127.0.0.1:9090
+#   Grafana     http://127.0.0.1:3000  (dashboard "goredis")
+#
+# Every published port is bound to 127.0.0.1, so nothing is reachable from
+# other machines on the network.
+#
+# Password (optional): create deploy/docker/.env (ignored by git, never commit
+# it) next to this file. Compose reads it automatically for ${...} substitution:
+#
+#   GOREDIS_REQUIREPASS=<a long random string>
+#   GOREDIS_PROTECTED_MODE=true
+#   GRAFANA_ADMIN_PASSWORD=<another random string>
+#
+# Image versions are pinned (tags verified on Docker Hub); Dependabot proposes
+# updates.
+
+name: goredis
+
+services:
+  goredis:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${GOREDIS_VERSION:-dev}
+    image: goredis:dev
+    restart: unless-stopped
+    environment:
+      # Protected mode refuses to start when listening on a non-loopback
+      # address (0.0.0.0 inside the container) without a password. Turning it
+      # off is acceptable here ONLY because the host ports below are bound to
+      # 127.0.0.1. If you publish the ports on another interface, set
+      # GOREDIS_REQUIREPASS in .env and GOREDIS_PROTECTED_MODE=true.
+      GOREDIS_PROTECTED_MODE: ${GOREDIS_PROTECTED_MODE:-false}
+      # Empty means no password. Set it in the untracked .env file.
+      GOREDIS_REQUIREPASS: ${GOREDIS_REQUIREPASS:-}
+      GOREDIS_AOF_FSYNC: everysec
+      GOREDIS_MAXMEMORY: 200mb
+      GOREDIS_LOG_LEVEL: info
+      GOREDIS_SHUTDOWN_TIMEOUT: 20s
+    ports:
+      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:9379:9379"
+    volumes:
+      - goredis-data:/data
+    # Longer than GOREDIS_SHUTDOWN_TIMEOUT so the AOF is flushed before SIGKILL.
+    stop_grace_period: 30s
+    # Healthcheck comes from the image (goredis -healthcheck -> /readyz).
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ../../monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - goredis
+
+  grafana:
+    image: grafana/grafana:13.3.1
+    restart: unless-stopped
+    environment:
+      # Anonymous users can view dashboards without logging in (local only).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Default admin login is admin/admin unless GRAFANA_ADMIN_PASSWORD is set
+      # in .env. Change it if this stack is reachable by anyone but you.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ../../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  goredis-data:
+  prometheus-data:
+  grafana-data:

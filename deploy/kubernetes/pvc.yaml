@@ -1,0 +1,16 @@
+# Holds the append-only file. ReadWriteOnce: one node mounts it at a time,
+# which matches the single-writer AOF. storageClassName is omitted so the
+# cluster default StorageClass is used; set it explicitly to pick a class
+# (prefer one with allowVolumeExpansion: true, see docs/kubernetes.md).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: goredis-data
+  labels:
+    app.kubernetes.io/name: goredis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

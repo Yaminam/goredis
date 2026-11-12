@@ -1,0 +1,33 @@
+# Non-secret settings, loaded into the container with envFrom. The password is
+# NOT here: it comes from the goredis-auth Secret via GOREDIS_REQUIREPASS_FILE.
+# Changing this ConfigMap does not restart the pod; run
+#   kubectl -n goredis rollout restart deployment/goredis
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: goredis-config
+  labels:
+    app.kubernetes.io/name: goredis
+data:
+  GOREDIS_ADDR: "0.0.0.0:6379"
+  GOREDIS_ADMIN_ADDR: "0.0.0.0:9379"
+  GOREDIS_AOF_ENABLED: "true"
+  GOREDIS_AOF_PATH: "/data/appendonly.aof"
+  GOREDIS_AOF_FSYNC: "everysec"
+  GOREDIS_AOF_LOAD_TRUNCATED: "true"
+  # Estimated dataset limit (noeviction: SET fails with -OOM above it). Kept
+  # well below the 256Mi container limit because the real heap is larger than
+  # the estimate (map overhead, connection buffers, AOF buffers, GC headroom).
+  GOREDIS_MAXMEMORY: "128mb"
+  GOREDIS_MAX_CLIENTS: "1000"
+  GOREDIS_IDLE_TIMEOUT: "5m"
+  GOREDIS_WRITE_TIMEOUT: "10s"
+  # Must stay below terminationGracePeriodSeconds in deployment.yaml (30s).
+  GOREDIS_SHUTDOWN_TIMEOUT: "20s"
+  GOREDIS_LOG_LEVEL: "info"
+  GOREDIS_LOG_FORMAT: "json"
+  # Refuse to start on 0.0.0.0 without a password.
+  GOREDIS_PROTECTED_MODE: "true"
+  GOREDIS_REQUIREPASS_FILE: "/etc/goredis/auth/password"
+  GOREDIS_DISABLED_COMMANDS: "FLUSHDB"
+  GOREDIS_ENABLE_PPROF: "false"

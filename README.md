@@ -126,6 +126,7 @@ Full trade-offs and failure handling are in [docs/persistence.md](docs/persisten
 | Benchmarks and performance testing | [docs/benchmarks.md](docs/benchmarks.md) |
 | Incident simulations and runbooks | [docs/incidents.md](docs/incidents.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Go primer (47 pages) with 73 interview Q&As on Go and goredis | [docs/Go_Basics.pdf](docs/Go_Basics.pdf) |
 
 ## Development
 

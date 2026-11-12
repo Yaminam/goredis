@@ -82,7 +82,7 @@ admin HTTP server).
 
 The single lock is a deliberate first design: simple, and verifiably correct
 with the race detector. The benchmarks show its cost: a 90/10 read/write mix
-across 16 threads runs about 5x slower per operation than a single thread
+across 16 threads runs about 4x slower per operation than a single-threaded GET (305 to 355 ns vs 72 to 81 ns)
 (see [benchmarks.md](benchmarks.md)). Sharding the map by key hash is the
 documented next step.
 

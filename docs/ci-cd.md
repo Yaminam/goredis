@@ -110,3 +110,20 @@ If a cluster is added later, the recommended shape is: a separate `deploy.yml` t
 - `docker-compose` (`/deploy/docker`): the Prometheus and Grafana images.
 
 Each Dependabot PR runs the full CI, including the smoke test and Trivy scan.
+
+## Verify workflow (real infrastructure)
+
+`.github/workflows/verify.yml` runs on pushes to `main` and on demand
+(`gh workflow run verify`). It deploys nothing outside the job.
+
+| Job | What it proves |
+|-----|----------------|
+| `kubernetes (kind)` | Builds the image, creates a kind cluster (kind binary checksum-pinned), creates the password Secret, and applies the **real** `deploy/kubernetes` manifests with only the image swapped. Then checks: rollout completes, the PVC binds, the pod is Ready with 0 restarts, `runAsUser=65532`, `readOnlyRootFilesystem=true`, JSON logs that never contain the password, `NOAUTH` without AUTH, `FLUSHDB` disabled, metrics and `/healthz`. Finally it runs `kubectl rollout restart` and checks that the old pod logged a graceful AOF flush and that the new pod replayed the data (`survived-restart`). |
+| `linux benchmarks` | Runs `go test -bench` and `goredis-bench` under `everysec` and `always` on Linux, writes the results to the job summary, and uploads them as the `linux-bench` artifact. |
+
+kind's default CNI does not enforce NetworkPolicy, so the NetworkPolicy is
+schema-validated (`k8s-validate`) but not exercised here.
+
+First verified run: `verify` run 43180662416 and `ci` run 43180662218
+(commit `4e738cc`, 12 Nov 2026). All 5 jobs passed. Trivy reported 0
+vulnerabilities in the image OS layer and all three binaries.

@@ -28,6 +28,10 @@ image, Kubernetes manifests, CI, a Grafana dashboard, and incident runbooks.
   (`log/slog`, text or JSON), Prometheus `/metrics`, `/healthz`, `/readyz`,
   optional pprof, graceful shutdown, a password via file or env, protected
   mode, `maxmemory`, disabled commands, and request size limits.
+- **Verified on real infrastructure** by CI: the Docker image is built,
+  smoke-tested (including a restart) and scanned (0 vulnerabilities), and
+  the Kubernetes manifests are deployed to a kind cluster, where auth, probes,
+  the security context and data surviving a pod restart are checked.
 - **Delivery**: a multi-stage distroless non-root Docker image, docker-compose
   with Prometheus and Grafana, Kubernetes manifests (Recreate strategy, PVC,
   probes, NetworkPolicy, security context), GitHub Actions CI with SHA-pinned
@@ -156,8 +160,8 @@ Test layout:
   it (measured in [docs/benchmarks.md](docs/benchmarks.md)).
 - `maxmemory` is an estimate of the dataset, not of process memory.
 - No automatic AOF rewrite trigger; run `BGREWRITEAOF` periodically.
-- Benchmarks were measured on a Windows laptop and have not been compared
-  with Redis.
+- Benchmarks were measured on a Windows laptop and a 2-vCPU GitHub Actions
+  Linux runner. They have not been compared with Redis.
 
 ## License
 
